@@ -41,16 +41,9 @@ jobs:
       - name: 安装 XcodeGen
         run: |
           set -e
-          if curl -sSL -o /tmp/xcodegen.zip \
-              https://github.com/yonaskolb/XcodeGen/releases/latest/download/xcodegen.zip; then
-            unzip -oq /tmp/xcodegen.zip -d /tmp/xcodegen
-            sudo mkdir -p /usr/local/bin /usr/local/share
-            sudo cp -R /tmp/xcodegen/bin/. /usr/local/bin/
-            sudo cp -R /tmp/xcodegen/share/. /usr/local/share/ 2>/dev/null || true
-          else
-            echo "直接下载失败，回退到 brew"
-            brew install xcodegen
-          fi
+          # macOS runner 预装 Homebrew，直接装最稳。
+          # （之前试过直接下载 release zip，但它的内部目录结构和预期不一致，容易踩坑。）
+          brew install xcodegen
           xcodegen --version
 
       - name: 生成 Xcode 工程
