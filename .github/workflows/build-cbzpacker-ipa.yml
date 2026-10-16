@@ -1,0 +1,106 @@
+# 把 CBZ 打包器编译成「未签名 IPA」，丢给巨魔安装。
+#
+# 这个 App 只做一件事：选一个漫画根目录，把里面每一个「直接含图片的文件夹」
+# 分别打包成一个 .cbz，输出到它自己的 Documents 目录（在「文件」App 里可见）。
+# 然后用 Aidoku 批量导入即可。
+#
+# 为什么不需要第三方压缩库：
+#   用的是系统自带的 NSFileCoordinator + .forUploading（iOS 8+），
+#   它会给文件夹生成一个临时 zip 快照。
+#
+# 为什么不需要签名：
+#   巨魔（TrollStore）会对 IPA 里的二进制做 fakesign 并保留任意 entitlements。
+#
+# 怎么用：
+#   仓库页面 → Actions → 左侧选 "Build CBZ Packer" → Run workflow
+#   跑完在 Artifacts 里下载 CBZPacker-unsigned.ipa
+
+name: Build CBZ Packer
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "cbz-packer/**"
+      - ".github/workflows/build-cbzpacker-ipa.yml"
+
+jobs:
+  build-ios:
+    runs-on: macos-26
+    timeout-minutes: 60
+
+    steps:
+      - name: 取出本仓库
+        uses: actions/checkout@v7
+
+      - name: 选择 Xcode 26.6
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "26.6"
+
+      - name: 安装 XcodeGen
+        run: |
+          set -e
+          if curl -sSL -o /tmp/xcodegen.zip \
+              https://github.com/yonaskolb/XcodeGen/releases/latest/download/xcodegen.zip; then
+            unzip -oq /tmp/xcodegen.zip -d /tmp/xcodegen
+            sudo mkdir -p /usr/local/bin /usr/local/share
+            sudo cp -R /tmp/xcodegen/bin/. /usr/local/bin/
+            sudo cp -R /tmp/xcodegen/share/. /usr/local/share/ 2>/dev/null || true
+          else
+            echo "直接下载失败，回退到 brew"
+            brew install xcodegen
+          fi
+          xcodegen --version
+
+      - name: 生成 Xcode 工程
+        working-directory: cbz-packer
+        run: |
+          xcodegen generate
+          echo "--- 生成的工程 ---"
+          ls -la
+          echo "--- 生成的 Info.plist ---"
+          cat Info.plist
+
+      - name: 构建（不签名）
+        working-directory: cbz-packer
+        run: |
+          xcodebuild \
+            -project CBZPacker.xcodeproj \
+            -scheme CBZPacker \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            archive \
+            -archivePath build/CBZPacker.xcarchive \
+            CODE_SIGN_IDENTITY= \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: 打包成 IPA
+        working-directory: cbz-packer
+        run: |
+          set -e
+          APP="build/CBZPacker.xcarchive/Products/Applications/CBZPacker.app"
+          if [ ! -d "$APP" ]; then
+            echo "::error::找不到 $APP，构建可能失败了"
+            exit 1
+          fi
+          rm -rf Payload CBZPacker-unsigned.ipa
+          mkdir Payload
+          cp -r "$APP" Payload/
+          # IPA 就是「一个叫 Payload 的目录，里面放 .app」再 zip 起来
+          zip -qry CBZPacker-unsigned.ipa Payload
+          ls -lh CBZPacker-unsigned.ipa
+          echo "--- 包内结构 ---"
+          unzip -l CBZPacker-unsigned.ipa | head -15
+          echo "--- Info.plist 关键项 ---"
+          plutil -p "$APP/Info.plist" | grep -E "CFBundleIdentifier|CFBundleDisplayName|UIFileSharingEnabled|LSSupportsOpeningDocumentsInPlace|MinimumOSVersion" || true
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: CBZPacker-unsigned-ipa
+          path: cbz-packer/CBZPacker-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
