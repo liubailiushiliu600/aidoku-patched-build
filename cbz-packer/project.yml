@@ -1,0 +1,77 @@
+# XcodeGen 工程描述文件。
+# 用 `xcodegen generate` 就能从这份纯文本配置生成 CBZPacker.xcodeproj，
+# 这样工程结构可以走 Git，也不需要在本地装 Xcode 才能维护。
+#
+# 构建命令（见 .github/workflows/build-cbzpacker-ipa.yml）：
+#   xcodegen generate
+#   xcodebuild -project CBZPacker.xcodeproj -scheme CBZPacker -configuration Release \
+#     -sdk iphoneos -destination 'generic/platform=iOS' archive \
+#     CODE_SIGN_IDENTITY= CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO
+
+name: CBZPacker
+
+options:
+  bundleIdPrefix: app.cbzpacker
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    # 巨魔会对 IPA 里的二进制做 fakesign，所以这里完全不用签名
+    CODE_SIGNING_ALLOWED: "NO"
+    CODE_SIGNING_REQUIRED: "NO"
+    CODE_SIGN_IDENTITY: ""
+    ENABLE_USER_SCRIPT_SANDBOXING: "NO"
+
+targets:
+  CBZPacker:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+    settings:
+      base:
+        PRODUCT_NAME: CBZPacker
+        PRODUCT_BUNDLE_IDENTIFIER: app.cbzpacker.CBZPacker
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+    info:
+      # XcodeGen 会按下面的 properties 生成这个 Info.plist
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: CBZ 打包器
+        CFBundleName: CBZPacker
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        # 这两个开关让 App 自己的 Documents 目录出现在「文件」App 里，
+        # 生成的 CBZ 才能被其他阅读器（Aidoku 等）看到并导入。
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+          UISceneConfigurations: {}
+
+schemes:
+  CBZPacker:
+    build:
+      targets:
+        CBZPacker: all
+    run:
+      config: Debug
+    archive:
+      config: Release
