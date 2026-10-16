@@ -42,6 +42,47 @@ index 4efe473..da74ef0 100644
      func handleUrl(url: URL) {
          if url.scheme == "aidoku" { // aidoku://
              if url.host == "addSourceList" { // addSourceList?url=
+diff --git a/Aidoku/App/Common/SwiftUI/Wrappers/DocumentPickerView.swift b/Aidoku/App/Common/SwiftUI/Wrappers/DocumentPickerView.swift
+index 749c662..6ddb145 100644
+--- a/Aidoku/App/Common/SwiftUI/Wrappers/DocumentPickerView.swift
++++ b/Aidoku/App/Common/SwiftUI/Wrappers/DocumentPickerView.swift
+@@ -22,15 +22,18 @@ private final class CoordinatedDocumentPickerViewController: UIDocumentPickerVie
+ public struct DocumentPickerView: UIViewControllerRepresentable {
+     public var allowedContentTypes: [UTType]
+     public var allowsMultipleSelection: Bool = false
++    public var asCopy: Bool = true
+     public var onDocumentsPicked: ([URL]) -> Void
+ 
+     public init(
+         allowedContentTypes: [UTType],
+         allowsMultipleSelection: Bool = false,
++        asCopy: Bool = true,
+         onDocumentsPicked: @escaping ([URL]) -> Void
+     ) {
+         self.allowedContentTypes = allowedContentTypes
+         self.allowsMultipleSelection = allowsMultipleSelection
++        self.asCopy = asCopy
+         self.onDocumentsPicked = onDocumentsPicked
+     }
+ 
+@@ -39,8 +42,15 @@ public struct DocumentPickerView: UIViewControllerRepresentable {
+     }
+ 
+     public func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+-        // setting asCopy to true fixes issues when sideloading the app
+-        let picker = CoordinatedDocumentPickerViewController(forOpeningContentTypes: allowedContentTypes, asCopy: true)
++        // asCopy 的含义(踩过坑):
++        //   true  = 导入模式, 只允许选「文件」; 文件夹是灰的、点不动。
++        //           侧载场景下选文件用它比较稳, 所以选文件保持 true。
++        //   false = 打开模式, 允许选「文件夹」; 返回的是安全作用域 URL,
++        //           需要调用方自己 startAccessingSecurityScopedResource()。
++        let picker = CoordinatedDocumentPickerViewController(
++            forOpeningContentTypes: allowedContentTypes,
++            asCopy: asCopy
++        )
+         picker.coordinator = context.coordinator
+         picker.allowsMultipleSelection = allowsMultipleSelection
+         return picker
 diff --git a/Aidoku/App/Resources/Localization/en.lproj/Localizable.strings b/Aidoku/App/Resources/Localization/en.lproj/Localizable.strings
 index 854aeaf..5d130b4 100644
 --- a/Aidoku/App/Resources/Localization/en.lproj/Localizable.strings
@@ -252,7 +293,7 @@ index 352894f..2de7b74 100644
 +    }
 +}
 diff --git a/Aidoku/Features/Source/LocalFileImportView.swift b/Aidoku/Features/Source/LocalFileImportView.swift
-index 6379599..06e9def 100644
+index 6379599..7ccbc9a 100644
 --- a/Aidoku/Features/Source/LocalFileImportView.swift
 +++ b/Aidoku/Features/Source/LocalFileImportView.swift
 @@ -63,11 +63,19 @@ extension LocalFileImportView {
@@ -277,7 +318,7 @@ index 6379599..06e9def 100644
          @Environment(\.dismiss) private var dismiss
  
          init(fileInfo: ImportFileInfo? = nil, fullyPresented: Binding<Bool>) {
-@@ -127,30 +135,21 @@ extension LocalFileImportView.ContentView {
+@@ -127,30 +135,22 @@ extension LocalFileImportView.ContentView {
                  }
              }
              .navigationBarTitleDisplayMode(.inline)
@@ -294,6 +335,7 @@ index 6379599..06e9def 100644
 -                    allowedContentTypes: [.init(filenameExtension: "cbz")!, .zip],
 +                    allowedContentTypes: mode.contentTypes,
 +                    allowsMultipleSelection: true,
++                    asCopy: mode.asCopy,
                      onDocumentsPicked: { urls in
 -                        guard let url = urls.first else {
 -                            loadingImport = false
@@ -318,7 +360,7 @@ index 6379599..06e9def 100644
                          }
                      }
                  )
-@@ -159,10 +158,12 @@ extension LocalFileImportView.ContentView {
+@@ -159,10 +159,12 @@ extension LocalFileImportView.ContentView {
              .onChange(of: fileInfo) { _ in
                  loadFileInfoFields()
              }
@@ -333,7 +375,7 @@ index 6379599..06e9def 100644
                      }
                  }
              }
-@@ -174,6 +175,85 @@ extension LocalFileImportView.ContentView {
+@@ -174,6 +176,85 @@ extension LocalFileImportView.ContentView {
          }
      }
  
@@ -419,7 +461,7 @@ index 6379599..06e9def 100644
      var halfSheetView: some View {
          VStack(spacing: 26) {
              VStack(spacing: 8) {
-@@ -187,30 +267,58 @@ extension LocalFileImportView.ContentView {
+@@ -187,30 +268,58 @@ extension LocalFileImportView.ContentView {
              .frame(maxWidth: .infinity)
              .padding(.top, -32)
  
@@ -494,7 +536,7 @@ index 6379599..06e9def 100644
      func fileInfoView(_ fileInfo: ImportFileInfo) -> some View {
          let interItemSpacing: CGFloat = 18
          return ScrollView {
-@@ -463,7 +571,10 @@ extension LocalFileImportView.ContentView {
+@@ -463,7 +572,10 @@ extension LocalFileImportView.ContentView {
              dismiss()
          } catch {
              LogManager.logger.error("Unable import file: \(error)")
@@ -506,7 +548,7 @@ index 6379599..06e9def 100644
          }
      }
  }
-@@ -687,6 +798,23 @@ extension LocalFileImportView.ContentView {
+@@ -687,6 +799,34 @@ extension LocalFileImportView.ContentView {
      }
  }
  
@@ -525,12 +567,23 @@ index 6379599..06e9def 100644
 +                return [.folder]
 +        }
 +    }
++
++    // 选文件夹必须用 asCopy: false(打开模式)。
++    // 用 true(导入模式)时文件夹在系统选择器里是灰的、点不动, 表现为「点了没反应」。
++    var asCopy: Bool {
++        switch self {
++            case .files:
++                return true
++            case .folder:
++                return false
++        }
++    }
 +}
 +
  // MARK: PresentationDetentHandler
  // handles the sheet changing from a half sheet to a full screen
  // only supported on ios 16+
-@@ -695,10 +823,10 @@ private struct PresentationDetentHandler<Content: View & Sendable>: View {
+@@ -695,10 +835,10 @@ private struct PresentationDetentHandler<Content: View & Sendable>: View {
      @Binding var fullyPresented: Bool
      @ViewBuilder let content: Content
  
