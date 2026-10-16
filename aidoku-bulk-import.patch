@@ -1,0 +1,546 @@
+diff --git a/Aidoku/App/AppDelegate.swift b/Aidoku/App/AppDelegate.swift
+index 4efe473..da74ef0 100644
+--- a/Aidoku/App/AppDelegate.swift
++++ b/Aidoku/App/AppDelegate.swift
+@@ -492,6 +492,39 @@ extension AppDelegate {
+         }
+     }
+ 
++    // 处理一批外部 URL
++    // 多个本地漫画文件时走批量导入, 避免连续弹出多个导入配置页
++    func handleUrls(urls: [URL]) {
++        guard !urls.isEmpty else { return }
++
++        let comicUrls = urls.filter {
++            SourceManager.shared.store.localSourceInstalled
++                && LocalFileManager.allowedFileExtensions.contains($0.pathExtension.lowercased())
++        }
++
++        if comicUrls.count > 1 {
++            Task { @MainActor in
++                let result = await LocalFileManager.shared.importArchives(comicUrls)
++                NotificationCenter.default.post(name: .init("refresh-content"), object: nil)
++                presentAlert(
++                    title: NSLocalizedString("BULK_IMPORT_DONE"),
++                    message: String(
++                        format: NSLocalizedString("BULK_IMPORT_DONE_TEXT"),
++                        result.success,
++                        result.failed
++                    )
++                )
++            }
++        }
++
++        let remaining = comicUrls.count > 1
++            ? urls.filter { !comicUrls.contains($0) }
++            : urls
++        for url in remaining {
++            handleUrl(url: url)
++        }
++    }
++
+     func handleUrl(url: URL) {
+         if url.scheme == "aidoku" { // aidoku://
+             if url.host == "addSourceList" { // addSourceList?url=
+diff --git a/Aidoku/App/Resources/Localization/en.lproj/Localizable.strings b/Aidoku/App/Resources/Localization/en.lproj/Localizable.strings
+index 854aeaf..5d130b4 100644
+--- a/Aidoku/App/Resources/Localization/en.lproj/Localizable.strings
++++ b/Aidoku/App/Resources/Localization/en.lproj/Localizable.strings
+@@ -225,6 +225,9 @@
+ "LOCAL_FILES_SETUP" = "Local Files Setup";
+ "IMPORT" = "Import";
+ "IMPORT_FILE" = "Import File";
++"IMPORT_FOLDER" = "Import Folder";
++"BULK_IMPORT_DONE" = "Import Finished";
++"BULK_IMPORT_DONE_TEXT" = "Imported %i, failed %i.";
+ "LOCAL_FILE_IMPORT" = "Local File Import";
+ "LOCAL_FILE_IMPORT_TEXT" = "Import a CBZ or ZIP file containing images to read.";
+ "CHAPTER_TITLE" = "Chapter Title";
+diff --git a/Aidoku/App/Resources/Localization/zh-Hans.lproj/Localizable.strings b/Aidoku/App/Resources/Localization/zh-Hans.lproj/Localizable.strings
+index e89170f..92177a8 100644
+--- a/Aidoku/App/Resources/Localization/zh-Hans.lproj/Localizable.strings
++++ b/Aidoku/App/Resources/Localization/zh-Hans.lproj/Localizable.strings
+@@ -399,6 +399,9 @@
+ "LOCAL_FILES" = "本地文件";
+ "LOCAL_FILES_SETUP" = "本地来源设置";
+ "IMPORT_FILE" = "导入文件";
++"IMPORT_FOLDER" = "导入文件夹";
++"BULK_IMPORT_DONE" = "导入完成";
++"BULK_IMPORT_DONE_TEXT" = "成功导入 %i 本，失败 %i 本。";
+ "LOCAL_FILE_IMPORT" = "本地文件导入";
+ "LOCAL_FILE_IMPORT_TEXT" = "导入包含图片的CBZ或ZIP文件进行阅读。";
+ "CHAPTER_TITLE" = "章节标题";
+diff --git a/Aidoku/App/SceneDelegate.swift b/Aidoku/App/SceneDelegate.swift
+index dadaffe..e87c52c 100644
+--- a/Aidoku/App/SceneDelegate.swift
++++ b/Aidoku/App/SceneDelegate.swift
+@@ -49,8 +49,8 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
+             ])
+         }
+ 
+-        if let url = connectionOptions.urlContexts.first?.url {
+-            UIApplication.shared.appDelegate?.handleUrl(url: url)
++        if !connectionOptions.urlContexts.isEmpty {
++            UIApplication.shared.appDelegate?.handleUrls(urls: connectionOptions.urlContexts.map { $0.url })
+         }
+     }
+ 
+@@ -76,9 +76,8 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
+     }
+ 
+     func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
+-        if let url = URLContexts.first?.url {
+-            UIApplication.shared.appDelegate?.handleUrl(url: url)
+-        }
++        guard !URLContexts.isEmpty else { return }
++        UIApplication.shared.appDelegate?.handleUrls(urls: URLContexts.map { $0.url })
+     }
+ 
+     func windowScene(
+diff --git a/Aidoku/Core/Sources/BuiltIn/Local/LocalFileManager.swift b/Aidoku/Core/Sources/BuiltIn/Local/LocalFileManager.swift
+index 352894f..2de7b74 100644
+--- a/Aidoku/Core/Sources/BuiltIn/Local/LocalFileManager.swift
++++ b/Aidoku/Core/Sources/BuiltIn/Local/LocalFileManager.swift
+@@ -661,3 +661,149 @@ extension LocalFileManager {
+         }
+     }
+ }
++
++// MARK: Folder Import
++extension LocalFileManager {
++    // 取某个文件夹里(不递归)的图片, 按文件名自然排序
++    private func imagesIn(_ folder: URL) -> [URL] {
++        let contents = (try? FileManager.default.contentsOfDirectory(
++            at: folder,
++            includingPropertiesForKeys: [.isRegularFileKey],
++            options: [.skipsHiddenFiles]
++        )) ?? []
++        return contents
++            .filter { url in
++                url.isFileURL && Self.allowedImageExtensions.contains(url.pathExtension.lowercased())
++            }
++            .sorted {
++                $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
++            }
++    }
++
++    // 取某个文件夹里的子文件夹, 按名称自然排序
++    private func subfoldersIn(_ folder: URL) -> [URL] {
++        let contents = (try? FileManager.default.contentsOfDirectory(
++            at: folder,
++            includingPropertiesForKeys: [.isDirectoryKey],
++            options: [.skipsHiddenFiles]
++        )) ?? []
++        return contents
++            .filter { url in
++                url.isFileURL && (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
++            }
++            .sorted {
++                $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
++            }
++    }
++
++    // 文件名里不能出现的字符统一替换掉
++    private func sanitize(_ name: String) -> String {
++        let invalid = CharacterSet(charactersIn: "/\\:*?\"<>|")
++        let cleaned = name.components(separatedBy: invalid).joined(separator: "-")
++        return cleaned.isEmpty ? "untitled" : cleaned
++    }
++
++    // 把一组图片打包成一个临时 cbz
++    // 注意: 必须放在临时目录的"子目录"里, 否则 uploadFile 内部再次拷贝时会和自身撞路径
++    private func makeTemporaryArchive(images: [URL]) throws -> URL {
++        let tempDir = FileManager.default.temporaryDirectory
++            .appendingPathComponent("aidoku-folder-import", isDirectory: true)
++        tempDir.createDirectory()
++
++        let archiveURL = tempDir.appendingPathComponent("\(UUID().uuidString).cbz")
++        let archive = try Archive(url: archiveURL, accessMode: .create)
++
++        let width = max(4, String(images.count).count)
++        for (index, image) in images.enumerated() {
++            var number = String(index + 1)
++            while number.count < width {
++                number = "0" + number
++            }
++            try archive.addEntry(
++                with: "\(number).\(image.pathExtension.lowercased())",
++                relativeTo: image.deletingLastPathComponent()
++            )
++        }
++        return archiveURL
++    }
++
++    // 导入一个文件夹, 返回成功导入的本数
++    // 规则一: 文件夹里直接有图片 -> 整个文件夹 = 一本漫画
++    // 规则二: 否则 -> 每个含图片的子文件夹 = 该系列下的一话
++    func importFolder(at folderURL: URL) async -> Int {
++        let accessGranted = folderURL.startAccessingSecurityScopedResource()
++        defer {
++            if accessGranted { folderURL.stopAccessingSecurityScopedResource() }
++        }
++
++        let seriesName = sanitize(folderURL.lastPathComponent)
++
++        // 规则一: 根层直接有图片
++        let rootImages = imagesIn(folderURL)
++        if !rootImages.isEmpty {
++            guard let archiveURL = try? makeTemporaryArchive(images: rootImages) else { return 0 }
++            defer { try? FileManager.default.removeItem(at: archiveURL) }
++            do {
++                try await uploadFile(
++                    from: archiveURL,
++                    mangaName: seriesName,
++                    chapterName: seriesName,
++                    chapter: 1
++                )
++                return 1
++            } catch {
++                LogManager.logger.error("Failed to import folder \(seriesName): \(error)")
++                return 0
++            }
++        }
++
++        // 规则二: 子文件夹当话
++        var imported = 0
++        for (index, sub) in subfoldersIn(folderURL).enumerated() {
++            let images = imagesIn(sub)
++            guard !images.isEmpty else { continue }
++            guard let archiveURL = try? makeTemporaryArchive(images: images) else { continue }
++            defer { try? FileManager.default.removeItem(at: archiveURL) }
++
++            let chapterName = sanitize(sub.lastPathComponent)
++            let chapterNumber = LocalFileNameParser.getMangaChapterNumber(from: sub.lastPathComponent)
++                ?? Float(index + 1)
++            do {
++                try await uploadFile(
++                    from: archiveURL,
++                    mangaName: seriesName,
++                    chapterName: chapterName,
++                    chapter: chapterNumber
++                )
++                imported += 1
++            } catch {
++                LogManager.logger.error("Failed to import chapter \(chapterName): \(error)")
++            }
++        }
++        return imported
++    }
++
++    // 批量导入多个 cbz/zip, 系列名从文件名解析
++    func importArchives(_ urls: [URL]) async -> (success: Int, failed: Int) {
++        var success = 0
++        var failed = 0
++        for url in urls {
++            let accessGranted = url.startAccessingSecurityScopedResource()
++            defer {
++                if accessGranted { url.stopAccessingSecurityScopedResource() }
++            }
++            let parsed = LocalFileNameParser.parseMangaSeries(from: url.lastPathComponent)
++            let seriesName = sanitize(
++                parsed.isEmpty ? url.deletingPathExtension().lastPathComponent : parsed
++            )
++            do {
++                try await uploadFile(from: url, mangaName: seriesName)
++                success += 1
++            } catch {
++                LogManager.logger.error("Failed to import \(url.lastPathComponent): \(error)")
++                failed += 1
++            }
++        }
++        return (success, failed)
++    }
++}
+diff --git a/Aidoku/Features/Source/LocalFileImportView.swift b/Aidoku/Features/Source/LocalFileImportView.swift
+index 6379599..06e9def 100644
+--- a/Aidoku/Features/Source/LocalFileImportView.swift
++++ b/Aidoku/Features/Source/LocalFileImportView.swift
+@@ -63,11 +63,19 @@ extension LocalFileImportView {
+         @State private var hasLoaded = false
+         @State private var loadingFile = false
+         @State private var loadingImport = false
+-        @State private var importing = false
+-        @State private var showImportFailAlert = false
+         @State private var showSeriesConfigurePage = false
+         @State private var showImagePicker = false
+ 
++        // MARK: Import Sheet / Alert
++        // 注意: sheet 和 alert 都只挂一个入口, 靠 importMode / 文案区分,
++        // 避免同一 view 上挂多个 sheet/alert 时互相顶掉。
++        @State private var importMode: ImportMode?
++        @State private var bulkImporting = false
++        @State private var loadingFolderImport = false
++        @State private var alertTitle = ""
++        @State private var alertMessage = ""
++        @State private var showAlert = false
++
+         @Environment(\.dismiss) private var dismiss
+ 
+         init(fileInfo: ImportFileInfo? = nil, fullyPresented: Binding<Bool>) {
+@@ -127,30 +135,21 @@ extension LocalFileImportView.ContentView {
+                 }
+             }
+             .navigationBarTitleDisplayMode(.inline)
+-            .alert(NSLocalizedString("IMPORT_FAIL"), isPresented: $showImportFailAlert) {
++            .alert(alertTitle, isPresented: $showAlert) {
+                 Button(NSLocalizedString("OK"), role: .cancel) {}
+             } message: {
+-                Text(NSLocalizedString("FILE_IMPORT_FAIL_TEXT"))
++                Text(alertMessage)
+             }
+-            .sheet(isPresented: $importing) {
++            .sheet(item: $importMode) { mode in
+                 DocumentPickerView(
+-                    allowedContentTypes: [.init(filenameExtension: "cbz")!, .zip],
++                    allowedContentTypes: mode.contentTypes,
++                    allowsMultipleSelection: true,
+                     onDocumentsPicked: { urls in
+-                        guard let url = urls.first else {
+-                            loadingImport = false
+-                            return
+-                        }
+-                        loadingFile = true
+-                        Task {
+-                            let importFileInfo = await LocalFileManager.shared.loadImportFileInfo(url: url)
+-                            if let importFileInfo {
+-                                fileInfo = importFileInfo
+-                                fullyPresented = true
+-                            } else {
+-                                showImportFailAlert = true
+-                            }
+-                            loadingFile = false
+-                            loadingImport = false
++                        switch mode {
++                            case .files:
++                                handlePickedFiles(urls)
++                            case .folder:
++                                handlePickedFolders(urls)
+                         }
+                     }
+                 )
+@@ -159,10 +158,12 @@ extension LocalFileImportView.ContentView {
+             .onChange(of: fileInfo) { _ in
+                 loadFileInfoFields()
+             }
+-            .onChange(of: importing) { newValue in
+-                if !newValue && !loadingFile {
++            .onChange(of: importMode) { newValue in
++                // sheet 关闭后收起转圈; 正在批量导入时保留, 让用户看得到进度
++                if newValue == nil && !loadingFile && !bulkImporting {
+                     withAnimation {
+                         loadingImport = false
++                        loadingFolderImport = false
+                     }
+                 }
+             }
+@@ -174,6 +175,85 @@ extension LocalFileImportView.ContentView {
+         }
+     }
+ 
++    // 选中的是 cbz/zip: 单个走原有的配置页, 多个直接批量导入
++    func handlePickedFiles(_ urls: [URL]) {
++        guard let url = urls.first else {
++            loadingImport = false
++            return
++        }
++        if urls.count > 1 {
++            bulkImporting = true
++            Task {
++                let result = await LocalFileManager.shared.importArchives(urls)
++                NotificationCenter.default.post(name: .init("refresh-content"), object: nil)
++                bulkImporting = false
++                loadingImport = false
++                presentAlert(
++                    NSLocalizedString("BULK_IMPORT_DONE"),
++                    String(
++                        format: NSLocalizedString("BULK_IMPORT_DONE_TEXT"),
++                        result.success,
++                        result.failed
++                    )
++                )
++            }
++            return
++        }
++        loadingFile = true
++        Task {
++            let importFileInfo = await LocalFileManager.shared.loadImportFileInfo(url: url)
++            if let importFileInfo {
++                fileInfo = importFileInfo
++                fullyPresented = true
++            } else {
++                presentAlert(
++                    NSLocalizedString("IMPORT_FAIL"),
++                    NSLocalizedString("FILE_IMPORT_FAIL_TEXT")
++                )
++            }
++            loadingFile = false
++            loadingImport = false
++        }
++    }
++
++    // 选中的是文件夹: 每个文件夹在 App 内现场打包成 cbz 再导入
++    func handlePickedFolders(_ urls: [URL]) {
++        guard !urls.isEmpty else {
++            loadingFolderImport = false
++            return
++        }
++        bulkImporting = true
++        Task {
++            var imported = 0
++            var failed = 0
++            for url in urls {
++                let count = await LocalFileManager.shared.importFolder(at: url)
++                if count > 0 {
++                    imported += count
++                } else {
++                    failed += 1
++                }
++            }
++            NotificationCenter.default.post(name: .init("refresh-content"), object: nil)
++            bulkImporting = false
++            loadingFolderImport = false
++            presentAlert(
++                NSLocalizedString("BULK_IMPORT_DONE"),
++                String(
++                    format: NSLocalizedString("BULK_IMPORT_DONE_TEXT"),
++                    imported,
++                    failed
++                )
++            )
++        }
++    }
++
++    func presentAlert(_ title: String, _ message: String) {
++        alertTitle = title
++        alertMessage = message
++        showAlert = true
++    }
++
+     var halfSheetView: some View {
+         VStack(spacing: 26) {
+             VStack(spacing: 8) {
+@@ -187,30 +267,58 @@ extension LocalFileImportView.ContentView {
+             .frame(maxWidth: .infinity)
+             .padding(.top, -32)
+ 
+-            Button {
+-                Task {
+-                    await animate(duration: 0.2) {
+-                        loadingImport = true
++            VStack(spacing: 12) {
++                importButton(
++                    title: NSLocalizedString("IMPORT_FILE"),
++                    systemImage: "folder.fill.badge.plus",
++                    loading: loadingImport
++                ) {
++                    Task {
++                        await animate(duration: 0.2) {
++                            loadingImport = true
++                        }
++                        importMode = .files
+                     }
+-                    importing = true
+                 }
+-            } label: {
+-                HStack {
+-                    if loadingImport {
+-                        ProgressView()
+-                            .progressViewStyle(.circular)
+-                    } else {
+-                        Image(systemName: "folder.fill.badge.plus")
+-                        Text(NSLocalizedString("IMPORT_FILE"))
++
++                importButton(
++                    title: NSLocalizedString("IMPORT_FOLDER"),
++                    systemImage: "folder.badge.plus",
++                    loading: loadingFolderImport
++                ) {
++                    Task {
++                        await animate(duration: 0.2) {
++                            loadingFolderImport = true
++                        }
++                        importMode = .folder
+                     }
+                 }
+-                .padding(.vertical, 8)
+-                .frame(maxWidth: .infinity)
+             }
+-            .buttonStyle(.bordered)
+         }
+     }
+ 
++    func importButton(
++        title: String,
++        systemImage: String,
++        loading: Bool,
++        action: @escaping () -> Void
++    ) -> some View {
++        Button(action: action) {
++            HStack {
++                if loading {
++                    ProgressView()
++                        .progressViewStyle(.circular)
++                } else {
++                    Image(systemName: systemImage)
++                    Text(title)
++                }
++            }
++            .padding(.vertical, 8)
++            .frame(maxWidth: .infinity)
++        }
++        .buttonStyle(.bordered)
++    }
++
+     func fileInfoView(_ fileInfo: ImportFileInfo) -> some View {
+         let interItemSpacing: CGFloat = 18
+         return ScrollView {
+@@ -463,7 +571,10 @@ extension LocalFileImportView.ContentView {
+             dismiss()
+         } catch {
+             LogManager.logger.error("Unable import file: \(error)")
+-            showImportFailAlert = true
++            presentAlert(
++                NSLocalizedString("IMPORT_FAIL"),
++                NSLocalizedString("FILE_IMPORT_FAIL_TEXT")
++            )
+         }
+     }
+ }
+@@ -687,6 +798,23 @@ extension LocalFileImportView.ContentView {
+     }
+ }
+ 
++// MARK: Import Mode
++private enum ImportMode: String, Identifiable {
++    case files
++    case folder
++
++    var id: String { rawValue }
++
++    var contentTypes: [UTType] {
++        switch self {
++            case .files:
++                return [.init(filenameExtension: "cbz")!, .zip]
++            case .folder:
++                return [.folder]
++        }
++    }
++}
++
+ // MARK: PresentationDetentHandler
+ // handles the sheet changing from a half sheet to a full screen
+ // only supported on ios 16+
+@@ -695,10 +823,10 @@ private struct PresentationDetentHandler<Content: View & Sendable>: View {
+     @Binding var fullyPresented: Bool
+     @ViewBuilder let content: Content
+ 
+-    @State private var detents: Set<PresentationDetent> = [.height(220)]
+-    @State private var detent: PresentationDetent = .height(220)
++    @State private var detents: Set<PresentationDetent> = [.height(290)]
++    @State private var detent: PresentationDetent = .height(290)
+ 
+-    private let defaultDetent = PresentationDetent.height(220)
++    private let defaultDetent = PresentationDetent.height(290)
+ 
+     var body: some View {
+         content
