@@ -8,8 +8,18 @@
 # 为什么不用签名：
 #   巨魔（TrollStore）会对 IPA 里的二进制做 fakesign 并保留任意 entitlements，
 #   所以「完全未签名」的 IPA 正是巨魔最想要的形式，不需要 Apple 开发者账号。
-#   本 workflow 里的 CODE_SIGNING_ALLOWED=NO 就是干这个的，和 Aidoku 官方
-#   nightly 构建用的是同一套参数。
+#   下面的 CODE_SIGNING_ALLOWED=NO 就是干这个的，和 Aidoku 官方 nightly 用的是同一套参数。
+#
+# ⚠️ 关于 ref 为什么固定成 60f990d6（重要，别随便改回 main）：
+#   Aidoku 上游在 2026-10-16 的提交 1c44a87b 里开始使用 @ContentBuilder ——
+#   这是 iOS 27 SDK 才有的新特性，必须配 Xcode 27 才能编译。
+#   而 GitHub 免费 runner 上最高只有 Xcode 26.6，编 main 会直接报：
+#       error: unknown attribute 'ContentBuilder'
+#       error: 'submitTaskRequest' has been renamed to 'submit(_:)'
+#   上游为此把 CI 换成了自建的 xcode-27 镜像，那个免费账号用不了。
+#   60f990d66850813cd791a382aea849c847b5e44c 是最后一个能配 Xcode 26.6 编过的提交
+#   （上游自己在这个 commit 上跑通过 nightly，用时 9m44s）。
+#   想换版本时，请选一个「上游用 macos-26 + Xcode 26.x 跑绿过」的 commit。
 #
 # 怎么用（不需要 fork Aidoku）：
 #   1. 在 GitHub 上新建一个空仓库（公开的，公开仓库的 macOS runner 免费）
@@ -22,15 +32,9 @@
 #   5. 跑完（约 10~20 分钟）在页面底部 Artifacts 里下载 Aidoku-patched-unsigned.ipa
 #   6. 传到 iPad，用巨魔打开安装
 #
-# 想更新到 Aidoku 最新代码：直接再跑一次这个 workflow，不用改任何东西。
-#
-# 如果你更想用 fork：
-#   把补丁 git apply 到自己的 fork 里推上去，然后删掉下面「拉取上游」和「应用补丁」
-#   两步，把「构建」那步的 working-directory 从 src 改成 . 即可。
-#
 # 排错：
-#   * 如果报 Xcode / SDK 版本过低，把 runs-on 换成 macos-latest 或更新的镜像标签
-#   * 如果 git apply 报冲突，说明上游改动动到了同样的行，需要重新生成补丁
+#   * 如果 setup-xcode 找不到 26.6，说明镜像变了，改成 runner 上实际有的版本
+#   * 如果 git apply 报冲突，说明目标 commit 动了同样的行，需要重新生成补丁
 #   * 构建日志里搜 "error:" 定位具体编译错误
 
 name: Build Aidoku (bulk import patch)
@@ -39,14 +43,15 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: "Aidoku 上游分支或标签（默认 main）"
+        description: "Aidoku 上游 commit / 分支 / 标签"
         required: false
-        default: "main"
+        # 最后一个能配 Xcode 26.x 编过的提交，见文件头说明
+        default: "60f990d66850813cd791a382aea849c847b5e44c"
 
 jobs:
   build-ios:
-    # macOS runner 是硬性要求，换不了
-    runs-on: macos-15
+    # macos-26 才有 Xcode 26.x；macos-15 最高只到 26.3
+    runs-on: macos-26
     timeout-minutes: 90
 
     steps:
@@ -70,12 +75,16 @@ jobs:
           echo "--- 补丁应用后的改动 ---"
           git diff --stat
 
-      - name: 选用 runner 上最新的 Xcode
+      - name: 选择 Xcode 26.6
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "26.6"
+
+      - name: 安装 iOS 平台
         run: |
-          newest="$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)"
-          if [ -n "$newest" ]; then sudo xcode-select -s "$newest"; fi
+          xcrun simctl list > /dev/null # 修掉下一条命令偶发失败的问题
+          xcodebuild -downloadPlatform iOS || true
           xcodebuild -version
-          echo "--- 可用的 iOS SDK ---"
           xcodebuild -showsdks | grep -i iphoneos || true
 
       - name: 构建（不签名）
