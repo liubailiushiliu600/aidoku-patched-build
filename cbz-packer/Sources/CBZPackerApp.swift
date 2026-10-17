@@ -67,19 +67,44 @@ enum Packer {
         return naturalSort(dirs)
     }
 
-    /// 递归找出所有「直接含图片」的文件夹 —— 每个这样的文件夹 = 一本漫画
-    static func imageFolders(under root: URL) -> [(folder: URL, images: [URL])] {
-        var found: [(URL, [URL])] = []
-        var queue: [URL] = [root]
+    /// 递归收集某个文件夹（含所有子目录）里的图片。
+    /// 目录按自然序、目录内文件也按自然序，所以结果大致就是阅读顺序。
+    static func imagesRecursive(in folder: URL) -> [URL] {
+        var all: [URL] = []
+        var queue: [URL] = [folder]
         while !queue.isEmpty {
             let current = queue.removeFirst()
-            let imgs = images(in: current)
-            if !imgs.isEmpty {
-                found.append((current, imgs))
-            }
+            all.append(contentsOf: images(in: current))
             queue.append(contentsOf: subfolders(of: current))
         }
-        return found
+        return all
+    }
+
+    /// 按「目标文件夹 → 每个一级子文件夹 = 一本漫画」的结构找出所有漫画。
+    ///
+    ///     目标文件夹/
+    ///         小文件夹A/   →  小文件夹A.cbz
+    ///         小文件夹B/   →  小文件夹B.cbz
+    ///
+    /// 每个一级子文件夹会**整包递归压缩**，所以即使它里面再按话分了子目录，
+    /// 也仍然算同一本漫画。Aidoku 是按扩展名跨目录过滤的，能按路径顺序正常读。
+    ///
+    /// 另外：如果目标文件夹自己就直接放着图片，那它本身也算一本。
+    static func books(in root: URL) -> [(folder: URL, images: [URL])] {
+        var result: [(URL, [URL])] = []
+
+        let rootImages = images(in: root)
+        if !rootImages.isEmpty {
+            result.append((root, rootImages))
+        }
+
+        for sub in subfolders(of: root) {
+            let imgs = imagesRecursive(in: sub)
+            if !imgs.isEmpty {
+                result.append((sub, imgs))
+            }
+        }
+        return result
     }
 
     /// 用系统自带的 NSFileCoordinator 把文件夹打成 zip。
@@ -189,11 +214,11 @@ final class PackerModel: ObservableObject {
 
             let rootName = root.lastPathComponent
             let isInbox = root.standardizedFileURL == Self.inboxURL.standardizedFileURL
-            let books = Packer.imageFolders(under: root)
+            let books = Packer.books(in: root)
             if books.isEmpty {
                 let reason = isInbox
-                    ? "收件箱是空的。请先在「文件」App 里把漫画文件夹拖进「输入」目录。"
-                    : "里面没有找到含图片的文件夹"
+                    ? "收件箱里没找到漫画。请把「目标文件夹」整个拖进「输入」目录，里面每个小文件夹算一本。"
+                    : "这个文件夹里没找到漫画（里面每个小文件夹应含图片）"
                 failures.append(PackFailure(name: rootName, reason: reason))
                 continue
             }
@@ -244,8 +269,22 @@ struct ContentView: View {
         NavigationView {
             List {
                 Section(
+                    header: Text("规则"),
+                    footer: Text("每个一级小文件夹 = 一本漫画，整包压缩；小文件夹里再分子目录也仍算同一本。")
+                        .font(.caption2)
+                ) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("目标文件夹/")
+                            .font(.system(.caption, design: .monospaced))
+                        ruleRow("小文件夹A/", "小文件夹A.cbz")
+                        ruleRow("小文件夹B/", "小文件夹B.cbz")
+                    }
+                    .padding(.vertical, 2)
+                }
+
+                Section(
                     header: Text("方式一 · 收件箱（推荐，最稳）"),
-                    footer: Text("在「文件」App 里打开：我的 iPad → CBZ 打包器 → 输入\n把漫画文件夹拖进去，再回来点下面的按钮。")
+                    footer: Text("在「文件」App 里打开：我的 iPad → CBZ 打包器 → 输入\n把「目标文件夹」整个拖进去，再回来点下面的按钮。")
                         .font(.caption2)
                 ) {
                     Button {
@@ -351,6 +390,21 @@ struct ContentView: View {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
         return formatter.string(fromByteCount: bytes)
+    }
+
+    /// 规则说明里的一行：`小文件夹A/  →  小文件夹A.cbz`
+    private func ruleRow(_ folder: String, _ output: String) -> some View {
+        HStack(spacing: 6) {
+            Text(folder)
+                .font(.system(.caption, design: .monospaced))
+            Text("→")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(output)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.leading, 14)
     }
 
     private func shareAll() {
