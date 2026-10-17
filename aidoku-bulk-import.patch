@@ -139,10 +139,10 @@ index dadaffe..e87c52c 100644
  
      func windowScene(
 diff --git a/Aidoku/Core/Sources/BuiltIn/Local/LocalFileManager.swift b/Aidoku/Core/Sources/BuiltIn/Local/LocalFileManager.swift
-index 352894f..2de7b74 100644
+index 352894f..c89e9cd 100644
 --- a/Aidoku/Core/Sources/BuiltIn/Local/LocalFileManager.swift
 +++ b/Aidoku/Core/Sources/BuiltIn/Local/LocalFileManager.swift
-@@ -661,3 +661,149 @@ extension LocalFileManager {
+@@ -661,3 +661,173 @@ extension LocalFileManager {
          }
      }
  }
@@ -188,6 +188,29 @@ index 352894f..2de7b74 100644
 +        return cleaned.isEmpty ? "untitled" : cleaned
 +    }
 +
++    // 递归收集文件夹内所有图片(支持小文件夹里再套子目录的情况)
++    // 按「相对路径」排序, 保证 第01话/001.jpg 一定排在 第02话/001.jpg 前面
++    private func imagesRecursive(in folder: URL) -> [URL] {
++        let prefix = folder.path + "/"
++        let enumerator = FileManager.default.enumerator(
++            at: folder,
++            includingPropertiesForKeys: [.isRegularFileKey],
++            options: [.skipsHiddenFiles]
++        )
++        var result: [URL] = []
++        while let url = enumerator?.nextObject() as? URL {
++            guard url.isFileURL else { continue }
++            guard Self.allowedImageExtensions.contains(url.pathExtension.lowercased()) else { continue }
++            result.append(url)
++        }
++        return result.sorted {
++            $0.path.replacingOccurrences(of: prefix, with: "")
++                .localizedStandardCompare(
++                    $1.path.replacingOccurrences(of: prefix, with: "")
++                ) == .orderedAscending
++        }
++    }
++
 +    // 把一组图片打包成一个临时 cbz
 +    // 注意: 必须放在临时目录的"子目录"里, 否则 uploadFile 内部再次拷贝时会和自身撞路径
 +    private func makeTemporaryArchive(images: [URL]) throws -> URL {
@@ -213,62 +236,66 @@ index 352894f..2de7b74 100644
 +    }
 +
 +    // 导入一个文件夹, 返回成功导入的本数
++    // 关键背景: Aidoku 本地源的约定是「Documents/Local/<名字>/ 一个文件夹 = 一部漫画」,
++    // 文件夹里的每个 cbz = 一个章节。所以「一本独立漫画」必须以独立文件夹导入。
 +    // 规则一: 文件夹里直接有图片 -> 整个文件夹 = 一本漫画
-+    // 规则二: 否则 -> 每个含图片的子文件夹 = 该系列下的一话
++    // 规则二: 否则 -> 每个含图片的一级子文件夹 = 一本独立漫画(不合并成一个系列)
 +    func importFolder(at folderURL: URL) async -> Int {
 +        let accessGranted = folderURL.startAccessingSecurityScopedResource()
 +        defer {
 +            if accessGranted { folderURL.stopAccessingSecurityScopedResource() }
 +        }
 +
-+        let seriesName = sanitize(folderURL.lastPathComponent)
++        var imported = 0
 +
-+        // 规则一: 根层直接有图片
++        // 规则一: 根层直接有图片, 整个文件夹就是一本
 +        let rootImages = imagesIn(folderURL)
 +        if !rootImages.isEmpty {
-+            guard let archiveURL = try? makeTemporaryArchive(images: rootImages) else { return 0 }
-+            defer { try? FileManager.default.removeItem(at: archiveURL) }
-+            do {
-+                try await uploadFile(
-+                    from: archiveURL,
-+                    mangaName: seriesName,
-+                    chapterName: seriesName,
-+                    chapter: 1
-+                )
-+                return 1
-+            } catch {
-+                LogManager.logger.error("Failed to import folder \(seriesName): \(error)")
-+                return 0
++            let rootName = sanitize(folderURL.lastPathComponent)
++            if let archiveURL = try? makeTemporaryArchive(images: rootImages) {
++                defer { try? FileManager.default.removeItem(at: archiveURL) }
++                do {
++                    try await uploadFile(
++                        from: archiveURL,
++                        mangaName: rootName,
++                        chapterName: rootName,
++                        chapter: 1
++                    )
++                    imported += 1
++                } catch {
++                    LogManager.logger.error("Failed to import folder \(rootName): \(error)")
++                }
 +            }
 +        }
 +
-+        // 规则二: 子文件夹当话
-+        var imported = 0
-+        for (index, sub) in subfoldersIn(folderURL).enumerated() {
-+            let images = imagesIn(sub)
++        // 规则二: 每个一级子文件夹各自打包成一部独立漫画
++        // 每个子文件夹递归收图,  mangaName 用子文件夹名, 保证各是各的本子
++        for sub in subfoldersIn(folderURL) {
++            let images = imagesRecursive(in: sub)
 +            guard !images.isEmpty else { continue }
 +            guard let archiveURL = try? makeTemporaryArchive(images: images) else { continue }
 +            defer { try? FileManager.default.removeItem(at: archiveURL) }
 +
-+            let chapterName = sanitize(sub.lastPathComponent)
-+            let chapterNumber = LocalFileNameParser.getMangaChapterNumber(from: sub.lastPathComponent)
-+                ?? Float(index + 1)
++            let bookName = sanitize(sub.lastPathComponent)
 +            do {
 +                try await uploadFile(
 +                    from: archiveURL,
-+                    mangaName: seriesName,
-+                    chapterName: chapterName,
-+                    chapter: chapterNumber
++                    mangaName: bookName,
++                    chapterName: bookName,
++                    chapter: 1
 +                )
 +                imported += 1
 +            } catch {
-+                LogManager.logger.error("Failed to import chapter \(chapterName): \(error)")
++                LogManager.logger.error("Failed to import book \(bookName): \(error)")
 +            }
 +        }
 +        return imported
 +    }
 +
-+    // 批量导入多个 cbz/zip, 系列名从文件名解析
++    // 批量导入多个 cbz/zip, 每个文件 = 一部独立漫画
++    // 注意: 不能用 LocalFileNameParser.parseMangaSeries 抽系列名,
++    // 那套正则会从「漫画A 01」「漫画A 02」里抽出同一系列名, 导致多本书被
++    // 合并成一部多章节的漫画。这里直接用完整文件名, 一书一文件夹, 互不合并。
 +    func importArchives(_ urls: [URL]) async -> (success: Int, failed: Int) {
 +        var success = 0
 +        var failed = 0
@@ -277,12 +304,9 @@ index 352894f..2de7b74 100644
 +            defer {
 +                if accessGranted { url.stopAccessingSecurityScopedResource() }
 +            }
-+            let parsed = LocalFileNameParser.parseMangaSeries(from: url.lastPathComponent)
-+            let seriesName = sanitize(
-+                parsed.isEmpty ? url.deletingPathExtension().lastPathComponent : parsed
-+            )
++            let bookName = sanitize(url.deletingPathExtension().lastPathComponent)
 +            do {
-+                try await uploadFile(from: url, mangaName: seriesName)
++                try await uploadFile(from: url, mangaName: bookName)
 +                success += 1
 +            } catch {
 +                LogManager.logger.error("Failed to import \(url.lastPathComponent): \(error)")
