@@ -293,7 +293,7 @@ index 352894f..2de7b74 100644
 +    }
 +}
 diff --git a/Aidoku/Features/Source/LocalFileImportView.swift b/Aidoku/Features/Source/LocalFileImportView.swift
-index 6379599..7ccbc9a 100644
+index 6379599..c917a6f 100644
 --- a/Aidoku/Features/Source/LocalFileImportView.swift
 +++ b/Aidoku/Features/Source/LocalFileImportView.swift
 @@ -63,11 +63,19 @@ extension LocalFileImportView {
@@ -334,7 +334,7 @@ index 6379599..7ccbc9a 100644
                  DocumentPickerView(
 -                    allowedContentTypes: [.init(filenameExtension: "cbz")!, .zip],
 +                    allowedContentTypes: mode.contentTypes,
-+                    allowsMultipleSelection: true,
++                    allowsMultipleSelection: mode.allowsMultipleSelection,
 +                    asCopy: mode.asCopy,
                      onDocumentsPicked: { urls in
 -                        guard let url = urls.first else {
@@ -548,7 +548,7 @@ index 6379599..7ccbc9a 100644
          }
      }
  }
-@@ -687,6 +799,34 @@ extension LocalFileImportView.ContentView {
+@@ -687,6 +799,46 @@ extension LocalFileImportView.ContentView {
      }
  }
  
@@ -578,12 +578,24 @@ index 6379599..7ccbc9a 100644
 +                return false
 +        }
 +    }
++
++    // 多选只对「选文件」有意义。
++    // 选文件夹时开多选, 点文件夹行往往是「进入」而不是「选中」,
++    // 结果就是选完点「打开」没反应。
++    var allowsMultipleSelection: Bool {
++        switch self {
++            case .files:
++                return true
++            case .folder:
++                return false
++        }
++    }
 +}
 +
  // MARK: PresentationDetentHandler
  // handles the sheet changing from a half sheet to a full screen
  // only supported on ios 16+
-@@ -695,10 +835,10 @@ private struct PresentationDetentHandler<Content: View & Sendable>: View {
+@@ -695,10 +847,10 @@ private struct PresentationDetentHandler<Content: View & Sendable>: View {
      @Binding var fullyPresented: Bool
      @ViewBuilder let content: Content
  
