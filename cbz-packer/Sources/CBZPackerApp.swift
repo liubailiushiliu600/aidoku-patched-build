@@ -138,6 +138,31 @@ final class PackerModel: ObservableObject {
     @Published var failures: [PackFailure] = []
     @Published var outputDir: URL?
 
+    /// 收件箱：用户把漫画文件夹拖到这里，App 直接扫描，不经过系统文件选择器。
+    /// 这条路不涉及安全作用域、不涉及选择器的「选中/进入」语义，最不容易出问题。
+    static var inboxURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("输入", isDirectory: true)
+    }
+
+    static var outputURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("CBZ", isDirectory: true)
+    }
+
+    /// 提前把「输入」和「CBZ」两个目录建出来，这样它们在「文件」App 里立刻可见
+    func ensureFolders() {
+        try? FileManager.default.createDirectory(at: Self.inboxURL, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: Self.outputURL, withIntermediateDirectories: true)
+        outputDir = Self.outputURL
+    }
+
+    /// 扫描收件箱并打包
+    func runInbox() {
+        ensureFolders()
+        run(roots: [Self.inboxURL])
+    }
+
     func run(roots: [URL]) {
         guard !isRunning, !roots.isEmpty else { return }
         isRunning = true
@@ -152,8 +177,7 @@ final class PackerModel: ObservableObject {
 
     private func pack(roots: [URL]) async {
         let fm = FileManager.default
-        let outDir = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("CBZ", isDirectory: true)
+        let outDir = Self.outputURL
         try? fm.createDirectory(at: outDir, withIntermediateDirectories: true)
         outputDir = outDir
 
@@ -164,9 +188,13 @@ final class PackerModel: ObservableObject {
             }
 
             let rootName = root.lastPathComponent
+            let isInbox = root.standardizedFileURL == Self.inboxURL.standardizedFileURL
             let books = Packer.imageFolders(under: root)
             if books.isEmpty {
-                failures.append(PackFailure(name: rootName, reason: "里面没有找到含图片的文件夹"))
+                let reason = isInbox
+                    ? "收件箱是空的。请先在「文件」App 里把漫画文件夹拖进「输入」目录。"
+                    : "里面没有找到含图片的文件夹"
+                failures.append(PackFailure(name: rootName, reason: reason))
                 continue
             }
 
@@ -215,17 +243,28 @@ struct ContentView: View {
     var body: some View {
         NavigationView {
             List {
-                Section {
-                    Text("选一个漫画根目录，App 会把里面每一个「直接含图片的文件夹」分别打包成一个 .cbz。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                Section(
+                    header: Text("方式一 · 收件箱（推荐，最稳）"),
+                    footer: Text("在「文件」App 里打开：我的 iPad → CBZ 打包器 → 输入\n把漫画文件夹拖进去，再回来点下面的按钮。")
+                        .font(.caption2)
+                ) {
+                    Button {
+                        model.runInbox()
+                    } label: {
+                        Label("扫描收件箱并打包", systemImage: "tray.and.arrow.down")
+                    }
+                    .disabled(model.isRunning)
                 }
 
-                Section {
+                Section(
+                    header: Text("方式二 · 直接选择文件夹"),
+                    footer: Text("如果系统选择器里文件夹选不中（点「打开」没反应），就用方式一。")
+                        .font(.caption2)
+                ) {
                     Button {
                         showPicker = true
                     } label: {
-                        Label("选择文件夹并开始打包", systemImage: "folder.badge.plus")
+                        Label("选择文件夹并打包", systemImage: "folder.badge.plus")
                     }
                     .disabled(model.isRunning)
                 }
@@ -289,14 +328,18 @@ struct ContentView: View {
                 }
             }
             .navigationTitle("CBZ 打包器")
+            .onAppear {
+                model.ensureFolders()
+            }
+            // 用单选版本：多选模式下文件夹行点一下往往是「进入」而不是「选中」，
+            // 会导致「打开」按钮点了没反应。
             .fileImporter(
                 isPresented: $showPicker,
-                allowedContentTypes: [.folder],
-                allowsMultipleSelection: true
+                allowedContentTypes: [.folder]
             ) { result in
                 switch result {
-                    case .success(let urls):
-                        model.run(roots: urls)
+                    case .success(let url):
+                        model.run(roots: [url])
                     case .failure(let error):
                         model.status = "选择失败：\(error.localizedDescription)"
                 }
